@@ -59,6 +59,11 @@ user_states = {}
 temp_data = {}
 
 # ==================== HELPER DB FUNCTIONS ====================
+def mask_phone_number(phone: str) -> str:
+    if len(phone) > 5:
+        return phone[:5] + "X" * (len(phone) - 5)
+    return phone
+
 async def get_user_data(user_id: int):
     user = await users_col.find_one({"user_id": user_id})
     if not user:
@@ -180,13 +185,14 @@ async def fetch_latest_otp(user_id: int, acc_id: str, is_manual: bool = False):
                 reply_markup=get_account_options_keyboard(acc_id)
             )
             
-            # Detailed Log on OTP Received
+            # Detailed Log on OTP Received (Masked Phone)
+            masked_phone = mask_phone_number(phone_number)
             log_text = (
                 f"✅ **LOGIN OTP RECEIVED!**\n\n"
                 f"👤 **Buyer ID:** `{user_id}`\n"
                 f"📁 **Category:** {category}\n"
                 f"🌍 **Country & Year:** {country} ({year})\n"
-                f"📞 **Phone Number:** `{phone_number}`\n\n"
+                f"📞 **Phone Number:** `{masked_phone}`\n\n"
                 f"📌 **Status:** Login Code Delivered"
             )
             await log_to_channel(log_text, reply_markup=get_buy_now_keyboard())
@@ -411,13 +417,14 @@ async def callback_router(client: Client, query: CallbackQuery):
 
         await query.message.edit_text(msg, reply_markup=get_account_options_keyboard(acc_id))
 
-        # Full Purchase Log with User ID, Category, Price & Cashback
+        # Full Purchase Log with User ID, Category, Price & Cashback (Masked Phone)
+        masked_phone = mask_phone_number(phone)
         log_text = (
             f"🛒 **NEW NUMBER PURCHASED!**\n\n"
             f"👤 **Buyer ID:** `{user_id}`\n"
             f"📂 **Category:** {category}\n"
             f"🌍 **Country & Year:** {country} ({year})\n"
-            f"📞 **Phone Number:** `{phone}`\n"
+            f"📞 **Phone Number:** `{masked_phone}`\n"
             f"💵 **Price Paid:** ₹{price:.2f}\n"
             f"🎁 **Cashback:** ₹{cashback:.2f}\n\n"
             f"📌 **Status:** Live Monitoring OTP..."
