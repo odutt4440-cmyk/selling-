@@ -282,10 +282,14 @@ def get_admin_panel_keyboard(user_id: int):
         
     buttons.append([
         InlineKeyboardButton("📊 Stats & Revenue", callback_data="admin_stats"),
-        InlineKeyboardButton("🛠️ Maintenance Mode", callback_data="admin_maint_panel")
+        InlineKeyboardButton("ℹ️ User History & Info", callback_data="admin_user_history")
+    ])
+
+    buttons.append([
+        InlineKeyboardButton("🛠️ Maintenance Mode", callback_data="admin_maint_panel"),
+        InlineKeyboardButton("📢 Broadcast DM", callback_data="admin_broadcast")
     ])
     
-    buttons.append([InlineKeyboardButton("📢 Broadcast DM", callback_data="admin_broadcast")])
     buttons.append([InlineKeyboardButton("🚫 Ban User", callback_data="admin_ban_user"), InlineKeyboardButton("🟢 Unban User", callback_data="admin_unban_user")])
     
     if user_id == OWNER_ID:
@@ -714,6 +718,15 @@ async def callback_router(client: Client, query: CallbackQuery):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]])
         )
 
+    elif data == "admin_user_history":
+        if user_id not in SUDO_USERS: return
+        user_states[user_id] = "ADM_STEP_GET_USER_HISTORY"
+        await query.message.edit_text(
+            "ℹ️ **FETCH USER DETAILS & HISTORY**\n\n"
+            "Send the **User ID** of the user whose complete information and history you want to check:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]])
+        )
+
     elif data == "admin_add_acc":
         if user_id not in SUDO_USERS: return
         kb = InlineKeyboardMarkup([
@@ -1084,7 +1097,50 @@ async def text_router(client: Client, message: Message):
     if not state:
         return
 
-    if state == "ADM_STEP_MAINT_REASON":
+    if state == "ADM_STEP_GET_USER_HISTORY":
+        if user_id not in SUDO_USERS: return
+        try:
+            target_id = int(message.text.strip())
+            u_data = await users_col.find_one({"user_id": target_id})
+            
+            if not u_data:
+                await message.reply_text(
+                    f"❌ **User ID `{target_id}` not found in Database!**",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]])
+                )
+                user_states.pop(user_id, None)
+                return
+
+            purchased_accs = await accounts_col.find({"sold_to": target_id, "status": "SOLD"}).to_list(length=100)
+            
+            history_text = ""
+            if purchased_accs:
+                history_text = "\n\n📦 **Purchased Accounts History:**\n"
+                for idx, acc in enumerate(purchased_accs, 1):
+                    history_text += f"{idx}. `{acc.get('phone_number')}` | {acc.get('category')} ({acc.get('country')} {acc.get('year')}) | ₹{acc.get('price', 0.0):.2f}\n"
+            else:
+                history_text = "\n\n📦 **Purchased Accounts History:** No accounts purchased yet."
+
+            status_ban = "🚫 Banned" if u_data.get("is_banned", False) else "🟢 Active"
+            ban_reason = f"\n⚠️ **Ban Reason:** {u_data.get('ban_reason')}" if u_data.get("is_banned", False) else ""
+
+            info_msg = (
+                f"👤 **USER DETAILED INFO & HISTORY**\n\n"
+                f"🆔 **User ID:** `{target_id}`\n"
+                f"📌 **Account Status:** {status_ban}{ban_reason}\n"
+                f"💵 **Wallet Balance:** ₹{u_data.get('balance', 0.0):.2f}\n"
+                f"🎁 **Profile Cashback:** ₹{u_data.get('profile_cashback', 0.0):.2f}\n"
+                f"🛍️ **Total Accounts Bought:** {len(purchased_accs)}"
+                f"{history_text}"
+            )
+
+            user_states.pop(user_id, None)
+            await message.reply_text(info_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]]))
+            
+        except ValueError:
+            await message.reply_text("❌ Invalid User ID! Please enter numeric User ID only:")
+
+    elif state == "ADM_STEP_MAINT_REASON":
         if user_id not in SUDO_USERS: return
         new_reason = message.text.strip()
         is_active, _ = await get_maintenance_status()
