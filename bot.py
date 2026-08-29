@@ -875,10 +875,10 @@ async def callback_router(client: Client, query: CallbackQuery):
             return
         user_states[user_id] = "ADM_STEP_EDIT_BAL"
         await query.message.edit_text(
-            "✏️ **EDIT USER BALANCE**\n\n"
-            "Send User ID and New Balance separated by space.\n"
-            "Format: `UserID NewBalance`\n"
-            "Example: `123456789 500`",
+            "✏️ **ADD USER BALANCE**\n\n"
+            "Send User ID and Balance to Add separated by space.\n"
+            "Format: `UserID BalanceToAdd`\n"
+            "Example: `123456789 5`",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]])
         )
 
@@ -1198,16 +1198,21 @@ async def text_router(client: Client, message: Message):
         try:
             parts = message.text.strip().split()
             if len(parts) != 2:
-                await message.reply_text("❌ Invalid Format! Use: `UserID NewBalance`")
+                await message.reply_text("❌ Invalid Format! Use: `UserID BalanceToAdd`")
                 return
 
             t_user_id = int(parts[0])
-            n_bal = float(parts[1])
+            add_amount = float(parts[1])
 
-            await set_user_balance(t_user_id, n_bal)
+            await update_balance(t_user_id, add_amount)
+            new_total = await get_user_balance(t_user_id)
+            
             user_states.pop(user_id, None)
             await message.reply_text(
-                f"✅ User balance updated!\n👤 User ID: `{t_user_id}`\n💰 New Balance: ₹{n_bal:.2f}",
+                f"✅ **Balance Added Successfully!**\n\n"
+                f"👤 User ID: `{t_user_id}`\n"
+                f"➕ Added Amount: ₹{add_amount:.2f}\n"
+                f"💰 New Balance: ₹{new_total:.2f}",
                 reply_markup=get_admin_panel_keyboard(user_id)
             )
         except ValueError:
