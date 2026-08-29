@@ -149,7 +149,9 @@ async def fetch_latest_otp(user_id: int, acc_id: str, is_manual: bool = False):
     phone_number = acc["phone_number"]
     session_string = acc["session_string"]
     two_fa = acc["two_fa"]
+    category = acc.get("category", "General")
     country = acc.get("country", "Global")
+    year = acc.get("year", "N/A")
     
     try:
         t_client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
@@ -178,13 +180,14 @@ async def fetch_latest_otp(user_id: int, acc_id: str, is_manual: bool = False):
                 reply_markup=get_account_options_keyboard(acc_id)
             )
             
-            # Send clean log to GC/Channel on OTP Received
+            # Detailed Log on OTP Received
             log_text = (
-                f"✅ **New SMM Order Placed Successfully**\n\n"
-                f"➖ **Platform:** Telegram\n"
-                f"➖ **Service:** {country} Telegram Account 👥\n\n"
-                f"➕ **Status:** OTP Received Successfully\n"
-                f"➕ **Link:** https://t.me/••••••••"
+                f"✅ **LOGIN OTP RECEIVED!**\n\n"
+                f"👤 **Buyer ID:** `{user_id}`\n"
+                f"📁 **Category:** {category}\n"
+                f"🌍 **Country & Year:** {country} ({year})\n"
+                f"📞 **Phone Number:** `{phone_number}`\n\n"
+                f"📌 **Status:** Login Code Delivered"
             )
             await log_to_channel(log_text, reply_markup=get_buy_now_keyboard())
 
@@ -408,14 +411,16 @@ async def callback_router(client: Client, query: CallbackQuery):
 
         await query.message.edit_text(msg, reply_markup=get_account_options_keyboard(acc_id))
 
-        # Log to Channel / GC without showing User ID or sensitive data
+        # Full Purchase Log with User ID, Category, Price & Cashback
         log_text = (
-            f"✅ **New SMM Order Placed Successfully**\n\n"
-            f"➖ **Platform:** Telegram\n"
-            f"➖ **Service:** {country} Telegram Account ({year}) 👥\n\n"
-            f"➕ **Quantity:** 1 Account\n"
-            f"➕ **Price:** ₹{price:.2f}\n"
-            f"➕ **Link:** https://t.me/••••••••"
+            f"🛒 **NEW NUMBER PURCHASED!**\n\n"
+            f"👤 **Buyer ID:** `{user_id}`\n"
+            f"📂 **Category:** {category}\n"
+            f"🌍 **Country & Year:** {country} ({year})\n"
+            f"📞 **Phone Number:** `{phone}`\n"
+            f"💵 **Price Paid:** ₹{price:.2f}\n"
+            f"🎁 **Cashback:** ₹{cashback:.2f}\n\n"
+            f"📌 **Status:** Live Monitoring OTP..."
         )
         await log_to_channel(log_text, reply_markup=get_buy_now_keyboard())
 
@@ -811,13 +816,13 @@ async def callback_router(client: Client, query: CallbackQuery):
         await query.message.edit_caption(caption=query.message.caption + f"\n\n✅ **APPROVED (+₹{amount:.2f})** by {admin_mention}")
         await app.send_message(dep_user_id, f"🎉 **Deposit Approved!** ₹{amount:.2f} credited to your wallet.")
         
-        # Public Deposit log (hiding user ID/username as requested)
+        # Detailed Approved Deposit Log
         log_text = (
-            f"✅ **New SMM Order Placed Successfully**\n\n"
-            f"➖ **Platform:** Wallet Deposit\n"
-            f"➖ **Service:** Wallet Balance Added 💳\n\n"
-            f"➕ **Status:** Payment Approved\n"
-            f"➕ **Link:** https://t.me/••••••••"
+            f"💳 **NEW DEPOSIT APPROVED!**\n\n"
+            f"👤 **User ID:** `{dep_user_id}`\n"
+            f"💰 **Amount Credited:** ₹{amount:.2f}\n"
+            f"👨‍💻 **Approved By Admin:** {admin_mention}\n\n"
+            f"📌 **Status:** Wallet Balance Added"
         )
         await log_to_channel(log_text, reply_markup=get_buy_now_keyboard())
 
@@ -859,12 +864,12 @@ async def callback_router(client: Client, query: CallbackQuery):
         await query.message.edit_caption(caption=query.message.caption + f"\n\n✅ **WITHDRAW SUCCESSFUL! Money Sent.**")
         await app.send_message(w_user_id, f"🎉 **Withdrawal Successful!** ₹{amount:.2f} has been transferred to your QR code.")
 
+        # Detailed Withdrawal Log
         log_text = (
-            f"✅ **New SMM Order Placed Successfully**\n\n"
-            f"➖ **Platform:** Wallet Withdrawal\n"
-            f"➖ **Service:** Cashback Payout 💸\n\n"
-            f"➕ **Status:** Completed\n"
-            f"➕ **Link:** https://t.me/••••••••"
+            f"💸 **NEW WITHDRAWAL PROCESSED!**\n\n"
+            f"👤 **User ID:** `{w_user_id}`\n"
+            f"💵 **Amount Paid:** ₹{amount:.2f}\n\n"
+            f"📌 **Status:** Withdrawal Completed"
         )
         await log_to_channel(log_text, reply_markup=get_buy_now_keyboard())
 
