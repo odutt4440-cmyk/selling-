@@ -22,6 +22,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+# Supports both Channel or Group ID (-100xxxxxxxxx)
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", os.getenv("LOG_GROUP_ID", "0")))
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
@@ -41,16 +42,15 @@ users_col = db["users"]
 accounts_col = db["accounts"]
 sudo_col = db["sudo_users"]
 requests_col = db["requests"]
-servers_col = db["servers"]
 
-SUDO_USERS = {}  # Format: {user_id: server_id}
+SUDO_USERS = set()
 
 async def init_db():
     global SUDO_USERS
-    await sudo_col.update_one({"user_id": OWNER_ID}, {"$set": {"user_id": OWNER_ID, "server_id": "GLOBAL"}}, upsert=True)
+    await sudo_col.update_one({"user_id": OWNER_ID}, {"$set": {"user_id": OWNER_ID}}, upsert=True)
     sudo_docs = await sudo_col.find().to_list(length=1000)
-    SUDO_USERS = {doc["user_id"]: doc.get("server_id", "GLOBAL") for doc in sudo_docs}
-    SUDO_USERS[OWNER_ID] = "GLOBAL"
+    SUDO_USERS = {doc["user_id"] for doc in sudo_docs}
+    SUDO_USERS.add(OWNER_ID)
 
 # ==================== BOT CLIENT SETUP ====================
 app = Client("ShopBotGUI", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -89,14 +89,14 @@ async def update_balance(user_id: int, amount: float):
 async def update_profile_cashback(user_id: int, amount: float):
     await users_col.update_one({"user_id": user_id}, {"$inc": {"profile_cashback": amount}}, upsert=True)
 
-async def add_sudo_user(user_id: int, server_id: str):
-    SUDO_USERS[user_id] = server_id
-    await sudo_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id, "server_id": server_id}}, upsert=True)
+async def add_sudo_user(user_id: int):
+    SUDO_USERS.add(user_id)
+    await sudo_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
 
 async def remove_sudo_user(user_id: int):
     if user_id == OWNER_ID:
         return
-    SUDO_USERS.pop(user_id, None)
+    SUDO_USERS.discard(user_id)
     await sudo_col.delete_one({"user_id": user_id})
 
 async def log_to_channel(text: str, reply_markup=None):
@@ -178,6 +178,7 @@ async def fetch_latest_otp(user_id: int, acc_id: str, is_manual: bool = False):
                 reply_markup=get_account_options_keyboard(acc_id)
             )
             
+            # Send clean log to GC/Channel on OTP Received
             log_text = (
                 f"✅ **New SMM Order Placed Successfully**\n\n"
                 f"➖ **Platform:** Telegram\n"
@@ -226,43 +227,46 @@ def get_main_menu_keyboard(user_id: int):
     buttons = [
         [InlineKeyboardButton("🛒 Buy Accounts", callback_data="user_buy_menu"), InlineKeyboardButton("💳 Deposit Money", callback_data="user_deposit_menu")],
         [InlineKeyboardButton("💸 Withdraw Cashback", callback_data="user_withdraw_menu")],
-        [InlineKeyboardButton("👤 Profile", callback_data="user_profile"), InlineKeyboardButton("👨‍💻 Support", url="https://t.me/your_admin_username")]
+        [InlineKeyboardButton("👤 Profile", callback_data="user_profile"), InlineKeyboardButton("👨‍💻 Support", url="https://t.me/papastocks")]
     ]
-    if user_id in SUDO_USERS or user_id == OWNER_ID:
+    if user_id in SUDO_USERS:
         buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="admin_panel")])
     return InlineKeyboardMarkup(buttons)
 
 def get_admin_panel_keyboard(user_id: int):
-    srv = SUDO_USERS.get(user_id, "GLOBAL")
-    
     row_1 = [
-        InlineKeyboardButton(f"➕ Add Stock ({srv})", callback_data="admin_add_acc"),
+        InlineKeyboardButton("➕ Add Account Stock", callback_data="admin_add_acc"),
         InlineKeyboardButton("🗑️ Remove Stock", callback_data="admin_remove_stock")
     ]
     
+    row_2 = []
+    if user_id == OWNER_ID:
+        row_2.append(InlineKeyboardButton("🏷️ Change Price (Owner)", callback_data="admin_change_price"))
+
     buttons = [row_1]
+    if row_2:
+        buttons.append(row_2)
     
     if user_id == OWNER_ID:
-        buttons.append([InlineKeyboardButton("🏷️ Change Price (Owner)", callback_data="admin_change_price")])
         buttons.append([InlineKeyboardButton("✏️ Edit User Balance", callback_data="admin_edit_bal")])
-        buttons.append([InlineKeyboardButton("🖥️ Manage Servers (Owner)", callback_data="admin_manage_servers")])
-        buttons.append([InlineKeyboardButton("👥 Manage Admins/Partners", callback_data="admin_manage_sudo")])
         
     buttons.append([InlineKeyboardButton("📢 Broadcast DM", callback_data="admin_broadcast")])
     buttons.append([InlineKeyboardButton("🚫 Ban User", callback_data="admin_ban_user"), InlineKeyboardButton("🟢 Unban User", callback_data="admin_unban_user")])
+    
+    if user_id == OWNER_ID:
+        buttons.append([InlineKeyboardButton("👥 Manage Admins (Owner Only)", callback_data="admin_manage_sudo")])
     
     buttons.append([InlineKeyboardButton("🔙 Exit Admin Panel", callback_data="user_main_menu")])
     return InlineKeyboardMarkup(buttons)
 
 async def get_manage_sudo_keyboard():
     buttons = [
-        [InlineKeyboardButton("➕ Add Admin/Partner", callback_data="adm_add_sudo_btn")]
+        [InlineKeyboardButton("➕ Add Admin", callback_data="adm_add_sudo_btn")]
     ]
     sudo_docs = await sudo_col.find({"user_id": {"$ne": OWNER_ID}}).to_list(length=100)
     for doc in sudo_docs:
         s_id = doc["user_id"]
-        srv_id = doc.get("server_id", "GLOBAL")
-        buttons.append([InlineKeyboardButton(f"❌ Remove {s_id} [{srv_id}]", callback_data=f"adm_rem_sudo_{s_id}")])
+        buttons.append([InlineKeyboardButton(f"❌ Remove {s_id}", callback_data=f"adm_rem_sudo_{s_id}")])
     
     buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")])
     return InlineKeyboardMarkup(buttons)
@@ -285,11 +289,10 @@ async def start_handler(client: Client, message: Message):
 async def admin_command_handler(client: Client, message: Message):
     user_id = message.from_user.id
     user_states.pop(user_id, None)
-    if user_id not in SUDO_USERS and user_id != OWNER_ID:
+    if user_id not in SUDO_USERS:
         await message.reply_text("🚫 **Unauthorized.** This command is restricted to admins.")
         return
-    srv = SUDO_USERS.get(user_id, "GLOBAL")
-    await message.reply_text(f"⚙️ **Welcome to the Admin Dashboard**\n🖥️ **Active Scope:** `{srv}`", reply_markup=get_admin_panel_keyboard(user_id))
+    await message.reply_text("⚙️ **Welcome to the Admin Dashboard**", reply_markup=get_admin_panel_keyboard(user_id))
 
 # ==================== CALLBACK ROUTER ====================
 @app.on_callback_query()
@@ -405,6 +408,7 @@ async def callback_router(client: Client, query: CallbackQuery):
 
         await query.message.edit_text(msg, reply_markup=get_account_options_keyboard(acc_id))
 
+        # Log to Channel / GC without showing User ID or sensitive data
         log_text = (
             f"✅ **New SMM Order Placed Successfully**\n\n"
             f"➖ **Platform:** Telegram\n"
@@ -555,35 +559,14 @@ async def callback_router(client: Client, query: CallbackQuery):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="user_main_menu")]])
         )
 
-    # ==================== ADMIN / SERVER HANDLERS ====================
+    # ==================== ADMIN PANEL HANDLERS ====================
     elif data == "admin_panel":
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         user_states.pop(user_id, None)
         await query.message.edit_text("⚙️ **Admin Dashboard**", reply_markup=get_admin_panel_keyboard(user_id))
 
-    elif data == "admin_manage_servers":
-        if user_id != OWNER_ID: return
-        servers = await servers_col.find().to_list(length=100)
-        buttons = [[InlineKeyboardButton("➕ Add New Server", callback_data="owner_add_server")]]
-        for s in servers:
-            buttons.append([InlineKeyboardButton(f"❌ Remove Server {s['server_id']}", callback_data=f"owner_rem_server_{s['server_id']}")])
-        buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")])
-        await query.message.edit_text("🖥️ **SERVER MANAGEMENT (Owner Only)**", reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif data == "owner_add_server":
-        if user_id != OWNER_ID: return
-        user_states[user_id] = "OWNER_INPUT_SERVER_ID"
-        await query.message.edit_text("📝 **Enter New Server ID (e.g. SERVER_1, USA_NODE):**")
-
-    elif data.startswith("owner_rem_server_"):
-        if user_id != OWNER_ID: return
-        srv_id = data.split("_")[3]
-        await servers_col.delete_one({"server_id": srv_id})
-        await query.answer(f"✅ Server {srv_id} Deleted!", show_alert=True)
-        await query.message.edit_text("⚙️ **Server deleted.**", reply_markup=get_admin_panel_keyboard(user_id))
-
     elif data == "admin_add_acc":
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⚡ Temporary Spam", callback_data="adm_cat_Temporary Spam")],
             [InlineKeyboardButton("🚫 Permanent Spam", callback_data="adm_cat_Permanent Spam")],
@@ -591,17 +574,13 @@ async def callback_router(client: Client, query: CallbackQuery):
             [InlineKeyboardButton("📜 Old Account", callback_data="adm_cat_Old Account")],
             [InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]
         ])
-        srv_name = SUDO_USERS.get(user_id, "GLOBAL")
-        await query.message.edit_text(f"📂 **Select Account Category (Server: `{srv_name}`):**", reply_markup=kb)
+        await query.message.edit_text("📂 **Select Account Category:**", reply_markup=kb)
 
     elif data == "admin_remove_stock":
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         
-        srv_filter = {} if user_id == OWNER_ID or SUDO_USERS.get(user_id) == "GLOBAL" else {"server_id": SUDO_USERS.get(user_id)}
-        srv_filter["status"] = "AVAILABLE"
-
         pipeline = [
-            {"$match": srv_filter},
+            {"$match": {"status": "AVAILABLE"}},
             {"$group": {
                 "_id": {
                     "category": "$category",
@@ -615,7 +594,7 @@ async def callback_router(client: Client, query: CallbackQuery):
         stocks = await accounts_col.aggregate(pipeline).to_list(length=100)
 
         if not stocks:
-            await query.answer("❌ Current server mein koi stock active nahi hai!", show_alert=True)
+            await query.answer("❌ Current mein koi active stock available nahi hai!", show_alert=True)
             return
 
         buttons = []
@@ -631,20 +610,57 @@ async def callback_router(client: Client, query: CallbackQuery):
             buttons.append([InlineKeyboardButton(btn_label, callback_data=f"adm_rmstock_confirm_{cat}_{country}_{year}_{price}")])
 
         buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")])
-        await query.message.edit_text("🗑️ **Select Stock Item to Remove/Delete:**", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.message.edit_text("🗑️ **Select Stock Item to Remove/Delete:**\n\n*(Is button par click karte hi yeh stock users list se turant automatically hide ho jayega)*", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data.startswith("adm_rmstock_confirm_"):
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         parts = data.split("_")
         cat, country, year, price = parts[3], parts[4], parts[5], float(parts[6])
 
-        srv_filter = {"category": cat, "country": country, "year": year, "price": price, "status": "AVAILABLE"}
-        if user_id != OWNER_ID and SUDO_USERS.get(user_id) != "GLOBAL":
-            srv_filter["server_id"] = SUDO_USERS.get(user_id)
+        res = await accounts_col.delete_many(
+            {"category": cat, "country": country, "year": year, "price": price, "status": "AVAILABLE"}
+        )
 
-        res = await accounts_col.delete_many(srv_filter)
         await query.answer(f"✅ Removed {res.deleted_count} items from stock!", show_alert=True)
-        await query.message.edit_text("✅ **Stock Item Removed.**", reply_markup=get_admin_panel_keyboard(user_id))
+
+        pipeline = [
+            {"$match": {"status": "AVAILABLE"}},
+            {"$group": {
+                "_id": {
+                    "category": "$category",
+                    "country": "$country",
+                    "year": "$year",
+                    "price": "$price"
+                },
+                "count": {"$sum": 1}
+            }}
+        ]
+        stocks = await accounts_col.aggregate(pipeline).to_list(length=100)
+
+        if not stocks:
+            await query.message.edit_text(
+                "✅ **All active stock items have been cleared.**",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]])
+            )
+            return
+
+        buttons = []
+        for s in stocks:
+            info = s["_id"]
+            cat_n = info.get("category", "General")
+            c_n = info["country"]
+            y_n = info["year"]
+            p_n = info["price"]
+            count_n = s["count"]
+
+            btn_label = f"🗑️ Delete [{cat_n}] {c_n} ({y_n}) | ₹{p_n} | 📦 Count: {count_n}"
+            buttons.append([InlineKeyboardButton(btn_label, callback_data=f"adm_rmstock_confirm_{cat_n}_{c_n}_{y_n}_{p_n}")])
+
+        buttons.append([InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")])
+        await query.message.edit_text(
+            f"✅ **Stock removed successfully! ({res.deleted_count} items deleted)**\n\nSelect another stock to remove:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
     elif data == "admin_change_price":
         if user_id != OWNER_ID:
@@ -723,16 +739,13 @@ async def callback_router(client: Client, query: CallbackQuery):
             return
         user_states.pop(user_id, None)
         kb = await get_manage_sudo_keyboard()
-        await query.message.edit_text("👥 **MANAGE ADMINS / PARTNERS**\n\nClick **➕ Add Admin/Partner** to register a user with server mapping:", reply_markup=kb)
+        await query.message.edit_text("👥 **MANAGE ADMINS**\n\nClick **➕ Add Admin** or click on any existing Admin ID to **Remove** them:", reply_markup=kb)
 
     elif data == "adm_add_sudo_btn":
         if user_id != OWNER_ID: return
         user_states[user_id] = "ADM_STEP_INPUT_ADD_SUDO"
         await query.message.edit_text(
-            "➕ **ADD NEW ADMIN / PARTNER**\n\n"
-            "Send **UserID** and **ServerID** separated by space.\n"
-            "Format: `UserID ServerID`\n"
-            "Example: `123456789 SRV_INDIA`",
+            "➕ **ADD NEW ADMIN**\n\nSend the **Telegram User ID** of the person you want to make Admin:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Manage Admins", callback_data="admin_manage_sudo")]])
         )
 
@@ -742,23 +755,20 @@ async def callback_router(client: Client, query: CallbackQuery):
         await remove_sudo_user(target_id)
         await query.answer(f"🗑️ Removed Admin {target_id}", show_alert=True)
         kb = await get_manage_sudo_keyboard()
-        await query.message.edit_text("👥 **MANAGE ADMINS / PARTNERS**", reply_markup=kb)
+        await query.message.edit_text("👥 **MANAGE ADMINS**\n\nClick **➕ Add Admin** or click on any existing Admin ID to **Remove** them:", reply_markup=kb)
 
     elif data.startswith("adm_cat_"):
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         cat = data.split("_")[2]
-        temp_data[user_id] = {
-            "category": cat,
-            "server_id": SUDO_USERS.get(user_id, "GLOBAL")
-        }
+        temp_data[user_id] = {"category": cat}
         user_states[user_id] = "ADM_STEP_COUNTRY"
         await query.message.edit_text(
-            f" Selected Category: **{cat}** (Server: `{SUDO_USERS.get(user_id, 'GLOBAL')}`)\n\n📝 **Step 1:** Enter Country Name (e.g. `India`, `USA`):",
+            f" Selected Category: **{cat}**\n\n📝 **Step 1:** Enter Country Name (e.g. `India`, `USA`):",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]])
         )
 
     elif data == "admin_broadcast":
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         user_states[user_id] = "ADM_STEP_BROADCAST"
         await query.message.edit_text(
             "📢 **Send the message you want to Broadcast in DM to all users:**",
@@ -766,7 +776,7 @@ async def callback_router(client: Client, query: CallbackQuery):
         )
 
     elif data == "admin_ban_user":
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         user_states[user_id] = "ADM_STEP_BAN_ID"
         await query.message.edit_text(
             "🚫 **Enter User ID or @Username to Ban:**",
@@ -774,7 +784,7 @@ async def callback_router(client: Client, query: CallbackQuery):
         )
 
     elif data == "admin_unban_user":
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         user_states[user_id] = "ADM_STEP_UNBAN_ID"
         await query.message.edit_text(
             "🟢 **Enter User ID or @Username to Unban:**",
@@ -782,7 +792,7 @@ async def callback_router(client: Client, query: CallbackQuery):
         )
 
     elif data.startswith("adm_app_dep_"):
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         _, _, _, dep_user_id, amount, req_id = data.split("_")
         dep_user_id = int(dep_user_id)
         amount = float(amount)
@@ -800,9 +810,19 @@ async def callback_router(client: Client, query: CallbackQuery):
         admin_mention = query.from_user.mention
         await query.message.edit_caption(caption=query.message.caption + f"\n\n✅ **APPROVED (+₹{amount:.2f})** by {admin_mention}")
         await app.send_message(dep_user_id, f"🎉 **Deposit Approved!** ₹{amount:.2f} credited to your wallet.")
+        
+        # Public Deposit log (hiding user ID/username as requested)
+        log_text = (
+            f"✅ **New SMM Order Placed Successfully**\n\n"
+            f"➖ **Platform:** Wallet Deposit\n"
+            f"➖ **Service:** Wallet Balance Added 💳\n\n"
+            f"➕ **Status:** Payment Approved\n"
+            f"➕ **Link:** https://t.me/••••••••"
+        )
+        await log_to_channel(log_text, reply_markup=get_buy_now_keyboard())
 
     elif data.startswith("adm_rej_dep_"):
-        if user_id not in SUDO_USERS and user_id != OWNER_ID: return
+        if user_id not in SUDO_USERS: return
         _, _, _, dep_user_id, req_id = data.split("_")
         dep_user_id = int(dep_user_id)
 
@@ -838,6 +858,15 @@ async def callback_router(client: Client, query: CallbackQuery):
 
         await query.message.edit_caption(caption=query.message.caption + f"\n\n✅ **WITHDRAW SUCCESSFUL! Money Sent.**")
         await app.send_message(w_user_id, f"🎉 **Withdrawal Successful!** ₹{amount:.2f} has been transferred to your QR code.")
+
+        log_text = (
+            f"✅ **New SMM Order Placed Successfully**\n\n"
+            f"➖ **Platform:** Wallet Withdrawal\n"
+            f"➖ **Service:** Cashback Payout 💸\n\n"
+            f"➕ **Status:** Completed\n"
+            f"➕ **Link:** https://t.me/••••••••"
+        )
+        await log_to_channel(log_text, reply_markup=get_buy_now_keyboard())
 
 # ==================== PHOTO RECEIVER ====================
 @app.on_message(filters.photo & filters.private)
@@ -888,32 +917,7 @@ async def text_router(client: Client, message: Message):
     if not state:
         return
 
-    if state == "OWNER_INPUT_SERVER_ID":
-        if user_id != OWNER_ID: return
-        srv_id = message.text.strip().upper()
-        await servers_col.insert_one({"server_id": srv_id, "created_at": time.time()})
-        user_states.pop(user_id, None)
-        await message.reply_text(f"✅ **Server `{srv_id}` Registered Successfully!**", reply_markup=get_admin_panel_keyboard(user_id))
-
-    elif state == "ADM_STEP_INPUT_ADD_SUDO":
-        if user_id != OWNER_ID: return
-        try:
-            parts = message.text.strip().split()
-            if len(parts) != 2:
-                await message.reply_text("❌ Invalid Format! Use: `UserID ServerID`")
-                return
-
-            target_id = int(parts[0])
-            srv_id = parts[1].upper()
-
-            await add_sudo_user(target_id, srv_id)
-            user_states.pop(user_id, None)
-            kb = await get_manage_sudo_keyboard()
-            await message.reply_text(f"✅ Admin `{target_id}` assigned to Server `{srv_id}`!", reply_markup=kb)
-        except ValueError:
-            await message.reply_text("❌ Invalid input!")
-
-    elif state == "WAIT_WITHDRAW_AMOUNT":
+    if state == "WAIT_WITHDRAW_AMOUNT":
         try:
             amount = float(message.text.strip())
             bal = await get_user_balance(user_id)
@@ -986,7 +990,10 @@ async def text_router(client: Client, message: Message):
                 logging.error(f"Failed sending DM to Admin {sudo_id}: {e}")
 
     elif state == "ADM_STEP_WAIT_NEW_PRICE":
-        if user_id != OWNER_ID: return
+        if user_id != OWNER_ID:
+            await message.reply_text("🚫 Only Owner can change prices!")
+            return
+
         try:
             new_price = float(message.text.strip())
             c_info = temp_data[user_id]
@@ -1008,7 +1015,10 @@ async def text_router(client: Client, message: Message):
             await message.reply_text("❌ Price must be a valid number! Try again:")
 
     elif state == "ADM_STEP_EDIT_BAL":
-        if user_id != OWNER_ID: return
+        if user_id != OWNER_ID:
+            await message.reply_text("🚫 Only Owner can edit balance!")
+            return
+
         try:
             parts = message.text.strip().split()
             if len(parts) != 2:
@@ -1027,13 +1037,25 @@ async def text_router(client: Client, message: Message):
         except ValueError:
             await message.reply_text("❌ Check your input numbers!")
 
+    elif state == "ADM_STEP_INPUT_ADD_SUDO":
+        if user_id != OWNER_ID: return
+        try:
+            target_id = int(message.text.strip())
+            await add_sudo_user(target_id)
+            user_states.pop(user_id, None)
+            kb = await get_manage_sudo_keyboard()
+            await message.reply_text(f"✅ User `{target_id}` added to Admins!", reply_markup=kb)
+        except ValueError:
+            await message.reply_text("❌ Invalid User ID! Enter numbers only:")
+
     elif state == "ADM_STEP_BROADCAST":
         user_states.pop(user_id, None)
         broadcast_msg = message.text
         cursor = users_col.find({"is_banned": False})
         users = await cursor.to_list(length=10000)
 
-        success, failed = 0, 0
+        success = 0
+        failed = 0
         await message.reply_text(f"⏳ **Starting broadcast to {len(users)} users...**")
 
         for u in users:
@@ -1049,6 +1071,7 @@ async def text_router(client: Client, message: Message):
     elif state == "ADM_STEP_BAN_ID":
         try:
             target_user = (await client.get_users(message.text.strip())).id
+
             if target_user == OWNER_ID or target_user in SUDO_USERS:
                 await message.reply_text("❌ You cannot ban yourself or another admin.")
                 user_states.pop(user_id, None)
@@ -1067,6 +1090,11 @@ async def text_router(client: Client, message: Message):
 
         await users_col.update_one({"user_id": target_user}, {"$set": {"is_banned": True, "ban_reason": reason}}, upsert=True)
         await message.reply_text(f"🚫 User `{target_user}` banned.\n**Reason:** {reason}", reply_markup=get_admin_panel_keyboard(user_id))
+        
+        try:
+            await app.send_message(target_user, f"🚫 **You have been banned from the bot.**\n\n**Reason:** {reason}")
+        except Exception:
+            pass
 
     elif state == "ADM_STEP_UNBAN_ID":
         try:
@@ -1074,6 +1102,10 @@ async def text_router(client: Client, message: Message):
             user_states.pop(user_id, None)
             await users_col.update_one({"user_id": target_user}, {"$set": {"is_banned": False, "ban_reason": ""}})
             await message.reply_text(f"🟢 User `{target_user}` is now Unbanned.", reply_markup=get_admin_panel_keyboard(user_id))
+            try:
+                await app.send_message(target_user, "🎉 **Your account has been unbanned by Admin!** You can use the bot again.")
+            except Exception:
+                pass
         except Exception:
             await message.reply_text("❌ Invalid User ID or Username:")
 
@@ -1141,7 +1173,6 @@ async def text_router(client: Client, message: Message):
             await t_client.disconnect()
 
             acc_doc = {
-                "server_id": data["server_id"],  # Dynamic Multi-Server Isolation Tag
                 "category": data["category"],
                 "country": data["country"],
                 "year": data["year"],
@@ -1157,7 +1188,7 @@ async def text_router(client: Client, message: Message):
 
             user_states.pop(user_id, None)
             await message.reply_text(
-                f"✅ **Account Added to Server `{data['server_id']}` Stock!**\n\n"
+                f"✅ **Account Added to MongoDB Stock!**\n\n"
                 f"📂 **Category:** {data['category']}\n"
                 f"🌍 **Location:** {data['country']} ({data['year']})\n"
                 f"📞 **Phone:** `{data['phone']}`",
@@ -1171,5 +1202,5 @@ async def text_router(client: Client, message: Message):
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(init_db())
-    print("🚀 Server Multi-Tenant Bot Engine Activated!")
+    print("🚀 Mongo Engine Activated!")
     app.run()
