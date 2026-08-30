@@ -53,7 +53,6 @@ async def init_db():
     SUDO_USERS = {doc["user_id"] for doc in sudo_docs}
     SUDO_USERS.add(OWNER_ID)
     
-    # Initialize default maintenance settings if not present
     m_doc = await settings_col.find_one({"key": "maintenance"})
     if not m_doc:
         await settings_col.insert_one({
@@ -160,7 +159,6 @@ def get_account_options_keyboard(acc_id: str):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Re-fetch OTP", callback_data=f"refetch_otp_{acc_id}")],
         [InlineKeyboardButton("📱 Manage Devices", callback_data=f"manage_devs_{acc_id}")],
-        [InlineKeyboardButton("🛠️ Terminate Other Sessions", callback_data=f"term_sess_{acc_id}")],
         [InlineKeyboardButton("🚪 Finish & Logout Bot", callback_data=f"logout_bot_{acc_id}")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="user_main_menu")]
     ])
@@ -510,23 +508,32 @@ async def callback_router(client: Client, query: CallbackQuery):
             await t_client.disconnect()
 
             dev_text = f"📱 **Active Devices List for** `{acc['phone_number']}`:\n\n"
+            buttons = []
+
             for idx, auth in enumerate(authorizations.authorizations, 1):
-                current_mark = " (Current Session)" if auth.current else ""
+                is_curr = " (Current Session)" if auth.current else ""
                 dev_text += (
-                    f"**{idx}. {auth.device_model}**{current_mark}\n"
+                    f"**{idx}. {auth.device_model}**{is_curr}\n"
                     f"▫️ **App:** {auth.app_name} ({auth.app_version})\n"
                     f"▫️ **System:** {auth.platform} ({auth.system_version})\n"
-                    f"▫️ **IP / Location:** `{auth.ip}` ({auth.country})\n\n"
+                    f"▫️ **IP:** `{auth.ip}` ({auth.country})\n\n"
                 )
+                
+                # Dynamic terminate buttons for each device session
+                btn_label = f"❌ Terminate {auth.device_model}" + (" (Current)" if auth.current else "")
+                buttons.append([InlineKeyboardButton(btn_label, callback_data=f"term_hash_{acc_id}_{auth.hash}")])
 
-            await query.message.reply_text(dev_text, reply_markup=get_account_options_keyboard(acc_id))
+            buttons.append([InlineKeyboardButton("🔙 Back to Options", callback_data=f"refetch_otp_{acc_id}")])
+            await query.message.reply_text(dev_text, reply_markup=InlineKeyboardMarkup(buttons))
 
         except Exception as e:
             await query.message.reply_text(f"❌ Error fetching active devices: `{e}`")
 
-    elif data.startswith("term_sess_"):
-        acc_id = data.split("_")[2]
-        await query.answer("🛠️ Terminating other sessions...", show_alert=False)
+    elif data.startswith("term_hash_"):
+        parts = data.split("_")
+        acc_id, hash_val = parts[2], int(parts[3])
+        
+        await query.answer("🛠️ Terminating selected session...", show_alert=False)
         acc = await accounts_col.find_one({"_id": ObjectId(acc_id)})
         
         if not acc:
@@ -541,29 +548,18 @@ async def callback_router(client: Client, query: CallbackQuery):
                 await query.message.reply_text(f"⚠️ **Account Session Expired or Closed:** `{acc['phone_number']}`")
                 return
 
-            authorizations = await t_client(GetAuthorizationsRequest())
-            terminated_count = 0
-            
-            for auth in authorizations.authorizations:
-                if not auth.current:
-                    try:
-                        await t_client(ResetAuthorizationRequest(hash=auth.hash))
-                        terminated_count += 1
-                    except FreshResetAuthorisationForbiddenError:
-                        await query.message.reply_text("⚠️ **Telegram Security Restriction:** New sessions cannot terminate other devices within 24 hours.")
-                        break
-                    except Exception as err:
-                        logging.error(f"Failed to terminate session hash {auth.hash}: {err}")
+            try:
+                await t_client(ResetAuthorizationRequest(hash=hash_val))
+                await query.message.reply_text("✅ **Device session terminated successfully!**")
+            except FreshResetAuthorisationForbiddenError:
+                await query.message.reply_text("⚠️ **Telegram Security Restriction:** New sessions cannot terminate other devices within 24 hours.")
+            except Exception as err:
+                await query.message.reply_text(f"❌ Failed to terminate device session: `{err}`")
 
             await t_client.disconnect()
-            if terminated_count > 0:
-                await query.message.reply_text(
-                    f"✅ **Terminated {terminated_count} other sessions successfully!**",
-                    reply_markup=get_account_options_keyboard(acc_id)
-                )
 
         except Exception as e:
-            await query.message.reply_text(f"❌ Failed to terminate other sessions: `{e}`")
+            await query.message.reply_text(f"❌ Error connecting to session: `{e}`")
 
     elif data.startswith("logout_bot_"):
         acc_id = data.split("_")[2]
